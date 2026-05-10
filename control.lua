@@ -4,14 +4,17 @@
 local LEVEL_UP_TICKS = 30 * 60 -- 30 seconds for debugging
 local INITIAL_TICK_RATE = 180 -- Generate item every 3 seconds (180 ticks)
 
--- Safe inventory define for Factorio 2.0 and 1.1 fallback
+-- Safe inventory define
 local INV_RESULT = defines.inventory.crafter_output or defines.inventory.furnace_result or 2
 
--- Define the tiers of items the machine can produce
+-- Define 6 buckets of items for progression with Science Packs
 local item_tiers = {
-    { "iron-ore", "copper-ore", "coal", "stone" },
-    { "iron-plate", "copper-plate", "steel-plate", "stone-brick" },
-    { "electronic-circuit", "iron-gear-wheel", "pipe", "copper-cable" }
+    { "iron-ore", "copper-ore", "coal", "stone", "wood", "automation-science-pack" }, -- Bucket 1: Raw / Red Science
+    { "iron-plate", "copper-plate", "stone-brick", "steel-plate", "logistic-science-pack" }, -- Bucket 2: Smelted / Green Science
+    { "iron-gear-wheel", "copper-cable", "pipe", "electronic-circuit", "military-science-pack" }, -- Bucket 3: Components / Gray Science
+    { "advanced-circuit", "engine-unit", "plastic-bar", "sulfur", "concrete", "chemical-science-pack" }, -- Bucket 4: Advanced / Blue Science
+    { "processing-unit", "electric-engine-unit", "battery", "flying-robot-frame", "production-science-pack" }, -- Bucket 5: Elite / Purple Science
+    { "low-density-structure", "rocket-fuel", "rocket-control-unit", "utility-science-pack", "space-science-pack" } -- Bucket 6: Space / Yellow & White Science
 }
 
 -- Helper for logging to the machine's internal log
@@ -21,6 +24,31 @@ local function machine_log(machine, message)
     if #machine.log > 5 then table.remove(machine.log) end
 end
 
+-- Helper to check if pool has an item
+local function pool_has_item(pool, item_name)
+    for _, name in pairs(pool) do
+        if name == item_name then return true end
+    end
+    return false
+end
+
+-- Helper to get unacquired items grouped by bucket
+local function get_active_buckets(machine)
+    local active_buckets = {}
+    for tier_index, tier_items in ipairs(item_tiers) do
+        local unacquired = {}
+        for _, item_name in pairs(tier_items) do
+            if not pool_has_item(machine.item_pool, item_name) then
+                table.insert(unacquired, item_name)
+            end
+        end
+        if #unacquired > 0 then
+            table.insert(active_buckets, {index = tier_index, items = unacquired})
+        end
+    end
+    return active_buckets
+end
+
 -- DATA REPAIR
 local function repair_machine(machine)
     local repaired = false
@@ -28,7 +56,6 @@ local function repair_machine(machine)
         machine.item_pool = {"iron-ore", "copper-ore"}
         repaired = true
     end
-    if not machine.tier then machine.tier = 1 repaired = true end
     if not machine.log then machine.log = {"Machine data repaired."} repaired = true end
     if not machine.level then machine.level = 1 repaired = true end
     if not machine.pending_upgrades then machine.pending_upgrades = 0 repaired = true end
@@ -61,8 +88,7 @@ local function on_entity_built(event)
             generation_tick_rate = INITIAL_TICK_RATE,
             next_generation_tick = game.tick + INITIAL_TICK_RATE,
             item_pool = {"iron-ore", "copper-ore"},
-            tier = 1,
-            log = {"Machine initialized."}
+            log = {"Machine initialized (Electric)."}
         }
         table.insert(storage.idle_machines, machine)
     end
@@ -92,7 +118,13 @@ local function update_gui(player, machine)
     local gen_remaining = math.max(0, machine.next_generation_tick - game.tick)
     local gen_progress = 1 - (gen_remaining / machine.generation_tick_rate)
     frame.status_flow.gen_flow.gen_bar.value = math.min(1, math.max(0, gen_progress))
-    frame.status_flow.gen_flow.gen_timer.caption = string.format("%.1fs", gen_remaining / 60)
+    
+    local items_per_second = 60 / machine.generation_tick_rate
+    if items_per_second > 1 then
+        frame.status_flow.gen_flow.gen_timer.caption = string.format("%.1f items/s", items_per_second)
+    else
+        frame.status_flow.gen_flow.gen_timer.caption = string.format("%.1fs", gen_remaining / 60)
+    end
     
     local ticks_this_level = machine.total_operating_ticks % LEVEL_UP_TICKS
     local level_remaining = LEVEL_UP_TICKS - ticks_this_level
@@ -106,11 +138,11 @@ local function update_gui(player, machine)
     frame.status_flow.status_label.caption = "Status: " .. (is_powered and "POWERED" or "NO POWER")
     frame.status_flow.status_label.style.font_color = is_powered and {0, 1, 0} or {1, 0, 0}
 
-    -- Update Item Pool UI (REFIXED: No names to avoid duplicates)
+    -- Update Item Pool UI
     local pool_flow = frame.pool_section.pool_flow
     if #pool_flow.children ~= #machine.item_pool then
         pool_flow.clear()
-        for i, item_name in pairs(machine.item_pool) do
+        for _, item_name in pairs(machine.item_pool) do
             pool_flow.add{
                 type = "sprite-button",
                 sprite = "item/" .. item_name,
@@ -126,7 +158,10 @@ local function update_gui(player, machine)
     frame.title_flow.title_label.caption = "Idle Machine Lvl " .. machine.level
     frame.upgrade_section.upgrade_label.caption = "Upgrades Available: " .. machine.pending_upgrades
     frame.upgrade_section.btn_flow.idle_upgrade_faster.enabled = machine.pending_upgrades > 0
-    frame.upgrade_section.btn_flow.idle_upgrade_more.enabled = machine.pending_upgrades > 0
+    
+    -- Disable "MORE" if no more items exist in buckets
+    local active_buckets = get_active_buckets(machine)
+    frame.upgrade_section.btn_flow.idle_upgrade_more.enabled = machine.pending_upgrades > 0 and #active_buckets > 0
 end
 
 -- The main loop
@@ -284,34 +319,38 @@ script.on_event(defines.events.on_gui_click, function(event)
     if not machine or machine.pending_upgrades <= 0 then return end
 
     if event.element.name == "idle_upgrade_faster" then
-        machine.generation_tick_rate = math.max(20, math.floor(machine.generation_tick_rate * 0.8))
+        -- Lowered minimum to 1 tick (60 items per second)
+        machine.generation_tick_rate = math.max(1, math.floor(machine.generation_tick_rate * 0.8))
         machine_log(machine, "UPGRADE: Production speed increased.")
     else
-        -- VARIETY UPGRADE LOGIC: Find an item not already in the pool
-        local current_tier_items = item_tiers[machine.tier] or item_tiers[#item_tiers]
-        local new_item = nil
-        
-        -- Try to find an item in current tier NOT in pool
-        local unacquired = {}
-        for _, tier_item in pairs(current_tier_items) do
-            local found = false
-            for _, pool_item in pairs(machine.item_pool) do
-                if pool_item == tier_item then found = true break end
-            end
-            if not found then table.insert(unacquired, tier_item) end
-        end
+        -- VARIETY UPGRADE LOGIC (Bucket System)
+        local active_buckets = get_active_buckets(machine)
 
-        if #unacquired > 0 then
-            new_item = unacquired[math.random(#unacquired)]
+        if #active_buckets == 0 then
+            machine_log(machine, "MAXED: Every possible item discovered!")
         else
-            -- If tier is full, try next tier or just a random one from top
-            machine.tier = math.min(#item_tiers, machine.tier + 1)
-            local next_tier_items = item_tiers[machine.tier]
-            new_item = next_tier_items[math.random(#next_tier_items)]
+            local target_bucket = nil
+            -- If only one bucket has items, force it (no 10% chance for a non-existent higher bucket)
+            if #active_buckets == 1 then
+                target_bucket = active_buckets[1]
+                local new_item = target_bucket.items[math.random(#target_bucket.items)]
+                table.insert(machine.item_pool, new_item)
+                machine_log(machine, string.format("UPGRADE: Found %s (Tier %d)", new_item, target_bucket.index))
+            else
+                -- 90% lowest bucket, 10% next bucket up
+                if math.random(1, 100) <= 90 then
+                    target_bucket = active_buckets[1]
+                    local new_item = target_bucket.items[math.random(#target_bucket.items)]
+                    table.insert(machine.item_pool, new_item)
+                    machine_log(machine, string.format("UPGRADE: Found %s (Tier %d)", new_item, target_bucket.index))
+                else
+                    target_bucket = active_buckets[2]
+                    local new_item = target_bucket.items[math.random(#target_bucket.items)]
+                    table.insert(machine.item_pool, new_item)
+                    machine_log(machine, string.format("CRITICAL SUCCESS! Found %s (Tier %d)", new_item, target_bucket.index))
+                end
+            end
         end
-
-        table.insert(machine.item_pool, new_item)
-        machine_log(machine, "UPGRADE: Added " .. new_item .. " to pool.")
     end
 
     machine.pending_upgrades = machine.pending_upgrades - 1

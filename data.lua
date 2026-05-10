@@ -50,7 +50,7 @@ local idle_machine_entity = {
     crafting_categories = {"idle-machine-crafting"},
     crafting_speed = 1,
     source_inventory_size = 0,
-    result_inventory_size = 10,
+    result_inventory_size = 20,
     energy_usage = "33kW", -- 33kW matches the 1 wood = 20 items balance at initial speed
     energy_source = {
         type = "electric",
