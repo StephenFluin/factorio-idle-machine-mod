@@ -22,6 +22,10 @@ local function calculate_generation_tick_rate(machine)
     return math.max(1, math.floor(base_rate * (0.8 ^ upgrades)))
 end
 
+local function item_exists(item_name)
+    return game and game.item_prototypes and game.item_prototypes[item_name] ~= nil
+end
+
 local function should_show_message_log(player)
     local player_settings = settings.get_player_settings(player)
     return player_settings["idle-machine-show-message-log"].value
@@ -34,7 +38,7 @@ local item_tiers = {
     { "iron-gear-wheel", "copper-cable", "pipe", "electronic-circuit", "military-science-pack" }, -- Bucket 3: Components / Gray Science
     { "advanced-circuit", "engine-unit", "plastic-bar", "sulfur", "concrete", "chemical-science-pack" }, -- Bucket 4: Advanced / Blue Science
     { "processing-unit", "electric-engine-unit", "battery", "flying-robot-frame", "production-science-pack" }, -- Bucket 5: Elite / Purple Science
-    { "low-density-structure", "rocket-fuel", "rocket-control-unit", "utility-science-pack", "space-science-pack" } -- Bucket 6: Space / Yellow & White Science
+    { "low-density-structure", "rocket-fuel", "rocket-part", "utility-science-pack", "space-science-pack" } -- Bucket 6: Space / Yellow & White Science
 }
 
 -- Helper for logging to the machine's internal log
@@ -58,7 +62,7 @@ local function get_active_buckets(machine)
     for tier_index, tier_items in ipairs(item_tiers) do
         local unacquired = {}
         for _, item_name in pairs(tier_items) do
-            if not pool_has_item(machine.item_pool, item_name) then
+            if item_exists(item_name) and not pool_has_item(machine.item_pool, item_name) then
                 table.insert(unacquired, item_name)
             end
         end
@@ -77,6 +81,21 @@ local function repair_machine(machine)
         repaired = true
     end
     if not machine.log then machine.log = {"Machine data repaired."} repaired = true end
+
+    local cleaned_pool = {}
+    for _, item_name in pairs(machine.item_pool) do
+        if item_exists(item_name) then
+            table.insert(cleaned_pool, item_name)
+        else
+            repaired = true
+        end
+    end
+    if #cleaned_pool == 0 then
+        cleaned_pool = {"iron-ore", "copper-ore"}
+        repaired = true
+    end
+    machine.item_pool = cleaned_pool
+
     if not machine.level then machine.level = 1 repaired = true end
     if not machine.pending_upgrades then machine.pending_upgrades = 0 repaired = true end
     if not machine.speed_upgrade_count then
@@ -181,9 +200,10 @@ local function update_gui(player, machine)
     if #pool_flow.children ~= #machine.item_pool then
         pool_flow.clear()
         for _, item_name in pairs(machine.item_pool) do
+            local sprite_name = item_exists(item_name) and ("item/" .. item_name) or "utility/questionmark"
             pool_flow.add{
                 type = "sprite-button",
-                sprite = "item/" .. item_name,
+                sprite = sprite_name,
                 tooltip = item_name,
                 style = "slot_button"
             }
@@ -212,7 +232,7 @@ script.on_event(defines.events.on_tick, function(event)
     if not storage.idle_machines then return end
     
     for i = #storage.idle_machines, 1, -1 do
-        local machine = storage.idle_machines[i]
+        local machine = repair_machine(storage.idle_machines[i])
         
         if not machine.entity.valid then
             table.remove(storage.idle_machines, i)
