@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import sys
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -28,6 +29,12 @@ EXCLUDE_PATTERNS = (
     ".gitignore",
 )
 
+REQUIRED_RELEASE_FILES = (
+    "info.json",
+    "data.lua",
+    "control.lua",
+)
+
 
 def load_mod_metadata() -> tuple[str, str]:
     with INFO_PATH.open("r", encoding="utf-8") as f:
@@ -40,6 +47,11 @@ def load_mod_metadata() -> tuple[str, str]:
         raise ValueError("info.json must contain both 'name' and 'version'.")
 
     return mod_name, mod_version
+
+
+def expected_archive_name() -> str:
+    mod_name, mod_version = load_mod_metadata()
+    return f"{mod_name}_{mod_version}.zip"
 
 
 def should_exclude(path: Path, output_file_name: str) -> bool:
@@ -73,15 +85,39 @@ def gather_files(output_file_name: str) -> list[Path]:
     return sorted(files)
 
 
+def validate_release_files(files: list[Path]) -> None:
+    included = {path.relative_to(REPO_ROOT).as_posix() for path in files}
+
+    missing_required = [name for name in REQUIRED_RELEASE_FILES if name not in included]
+    if missing_required:
+        missing_text = ", ".join(missing_required)
+        raise RuntimeError(f"Missing required release files: {missing_text}")
+
+    if "LICENSE" not in included:
+        print(
+            "Warning: LICENSE not found in package contents. "
+            "Adding a plaintext LICENSE is strongly recommended for mod portal releases.",
+            file=sys.stderr,
+        )
+
+    if "thumbnail.png" not in included:
+        print(
+            "Warning: thumbnail.png not found in package contents. "
+            "Adding one is recommended for better mod portal presentation.",
+            file=sys.stderr,
+        )
+
+
 def build_archive(output_name: str) -> Path:
-    mod_name, mod_version = load_mod_metadata()
-    root_in_zip = f"{mod_name}_{mod_version}"
     files = gather_files(output_name)
 
     if not files:
         raise RuntimeError("No files selected for packaging.")
 
+    validate_release_files(files)
+
     output_path = REPO_ROOT / output_name
+    root_in_zip = output_path.stem
 
     with ZipFile(output_path, "w", compression=ZIP_DEFLATED) as zf:
         for file_path in files:
@@ -93,6 +129,8 @@ def build_archive(output_name: str) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
+    default_output = expected_archive_name()
+
     parser = argparse.ArgumentParser(
         description=(
             "Build a distributable Factorio mod zip from this repository, "
@@ -101,10 +139,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="idle-machine.zip",
-        help="Output zip filename (default: idle-machine.zip)",
+        default=default_output,
+        help=f"Output zip filename (default: {default_output})",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    expected = expected_archive_name()
+    if args.output != expected:
+        raise ValueError(
+            f"Output filename must match Factorio release format from info.json: {expected}"
+        )
+
+    return args
 
 
 def main() -> int:

@@ -1,4 +1,6 @@
 -- Data stage: Defining the machine's existence
+local idle_machine_energy_usage_kw = settings.startup["idle-machine-electricity-kw"].value
+
 local idle_machine_item = {
     type = "item",
     name = "idle-machine",
@@ -51,7 +53,7 @@ local idle_machine_entity = {
     crafting_speed = 1,
     source_inventory_size = 0,
     result_inventory_size = 20,
-    energy_usage = "33kW", -- 33kW matches the 1 wood = 20 items balance at initial speed
+    energy_usage = tostring(idle_machine_energy_usage_kw) .. "kW",
     energy_source = {
         type = "electric",
         usage_priority = "secondary-input",

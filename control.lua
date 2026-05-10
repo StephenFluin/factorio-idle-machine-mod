@@ -1,11 +1,31 @@
 -- Control stage: The logic of the machine
 -- Every tick, we update our machine instances
 
-local LEVEL_UP_TICKS = 30 * 60 -- 30 seconds for debugging
-local INITIAL_TICK_RATE = 180 -- Generate item every 3 seconds (180 ticks)
+local TICKS_PER_SECOND = 60
 
 -- Safe inventory define
 local INV_RESULT = defines.inventory.crafter_output or defines.inventory.furnace_result or 2
+
+local function get_level_up_ticks()
+    local seconds = settings.global["idle-machine-levelup-seconds"].value
+    return math.max(1, math.floor(seconds * TICKS_PER_SECOND))
+end
+
+local function get_base_generation_tick_rate()
+    local seconds = settings.global["idle-machine-generation-seconds"].value
+    return math.max(1, math.floor(seconds * TICKS_PER_SECOND))
+end
+
+local function calculate_generation_tick_rate(machine)
+    local upgrades = machine.speed_upgrade_count or 0
+    local base_rate = get_base_generation_tick_rate()
+    return math.max(1, math.floor(base_rate * (0.8 ^ upgrades)))
+end
+
+local function should_show_message_log(player)
+    local player_settings = settings.get_player_settings(player)
+    return player_settings["idle-machine-show-message-log"].value
+end
 
 -- Define 6 buckets of items for progression with Science Packs
 local item_tiers = {
@@ -59,7 +79,22 @@ local function repair_machine(machine)
     if not machine.log then machine.log = {"Machine data repaired."} repaired = true end
     if not machine.level then machine.level = 1 repaired = true end
     if not machine.pending_upgrades then machine.pending_upgrades = 0 repaired = true end
-    if not machine.generation_tick_rate then machine.generation_tick_rate = INITIAL_TICK_RATE repaired = true end
+    if not machine.speed_upgrade_count then
+        local current_rate = machine.generation_tick_rate or get_base_generation_tick_rate()
+        local base_rate = get_base_generation_tick_rate()
+        local estimated = 0
+        if current_rate < base_rate then
+            estimated = math.floor((math.log(current_rate / base_rate) / math.log(0.8)) + 0.5)
+        end
+        machine.speed_upgrade_count = math.max(0, estimated)
+        repaired = true
+    end
+    machine.generation_tick_rate = calculate_generation_tick_rate(machine)
+    repaired = true
+    if machine.level_progress_ticks == nil then
+        machine.level_progress_ticks = machine.total_operating_ticks % get_level_up_ticks()
+        repaired = true
+    end
     if not machine.next_generation_tick then machine.next_generation_tick = game.tick + machine.generation_tick_rate repaired = true end
     return machine
 end
@@ -83,10 +118,12 @@ local function on_entity_built(event)
         local machine = {
             entity = entity,
             total_operating_ticks = 0,
+            level_progress_ticks = 0,
             level = 1,
             pending_upgrades = 0,
-            generation_tick_rate = INITIAL_TICK_RATE,
-            next_generation_tick = game.tick + INITIAL_TICK_RATE,
+            speed_upgrade_count = 0,
+            generation_tick_rate = get_base_generation_tick_rate(),
+            next_generation_tick = game.tick + get_base_generation_tick_rate(),
             item_pool = {"iron-ore", "copper-ore"},
             log = {"Machine initialized (Electric)."}
         }
@@ -126,9 +163,10 @@ local function update_gui(player, machine)
         frame.status_flow.gen_flow.gen_timer.caption = string.format("%.1fs", gen_remaining / 60)
     end
     
-    local ticks_this_level = machine.total_operating_ticks % LEVEL_UP_TICKS
-    local level_remaining = LEVEL_UP_TICKS - ticks_this_level
-    local level_progress = ticks_this_level / LEVEL_UP_TICKS
+    local level_up_ticks = get_level_up_ticks()
+    local ticks_this_level = machine.level_progress_ticks or 0
+    local level_remaining = level_up_ticks - ticks_this_level
+    local level_progress = ticks_this_level / level_up_ticks
     frame.status_flow.level_flow.level_bar.value = math.min(1, math.max(0, level_progress))
     frame.status_flow.level_flow.level_timer.caption = string.format("%ds", math.floor(level_remaining / 60))
     
@@ -153,7 +191,12 @@ local function update_gui(player, machine)
     end
 
     -- Update Log
-    frame.log_flow.log_box.caption = table.concat(machine.log or {}, "\n")
+    local show_log = should_show_message_log(player)
+    frame.log_separator.visible = show_log
+    frame.log_flow.visible = show_log
+    if show_log then
+        frame.log_flow.log_box.caption = table.concat(machine.log or {}, "\n")
+    end
 
     frame.title_flow.title_label.caption = "Idle Machine Lvl " .. machine.level
     frame.upgrade_section.upgrade_label.caption = "Upgrades Available: " .. machine.pending_upgrades
@@ -181,9 +224,12 @@ script.on_event(defines.events.on_tick, function(event)
         
         if is_powered then
             machine.total_operating_ticks = machine.total_operating_ticks + 1
+            machine.level_progress_ticks = (machine.level_progress_ticks or 0) + 1
             
             -- Handle Level Up
-            if machine.total_operating_ticks > 0 and machine.total_operating_ticks % LEVEL_UP_TICKS == 0 then
+            local level_up_ticks = get_level_up_ticks()
+            while machine.level_progress_ticks >= level_up_ticks do
+                machine.level_progress_ticks = machine.level_progress_ticks - level_up_ticks
                 machine.level = machine.level + 1
                 machine.pending_upgrades = machine.pending_upgrades + 1
                 machine_log(machine, "LEVEL UP! Gained 1 upgrade point.")
@@ -272,7 +318,7 @@ script.on_event(defines.events.on_gui_opened, function(event)
     pool_flow.style.minimal_height = 40
 
     -- Event Log Section
-    frame.add{type = "line"}
+    frame.add{type = "line", name = "log_separator"}
     local log_flow = frame.add{type = "flow", name = "log_flow", direction = "vertical"}
     log_flow.style.padding = 8
     log_flow.add{type = "label", caption = "Machine Event Log:", style = "heading_2_label"}
@@ -319,8 +365,8 @@ script.on_event(defines.events.on_gui_click, function(event)
     if not machine or machine.pending_upgrades <= 0 then return end
 
     if event.element.name == "idle_upgrade_faster" then
-        -- Lowered minimum to 1 tick (60 items per second)
-        machine.generation_tick_rate = math.max(1, math.floor(machine.generation_tick_rate * 0.8))
+        machine.speed_upgrade_count = (machine.speed_upgrade_count or 0) + 1
+        machine.generation_tick_rate = calculate_generation_tick_rate(machine)
         machine_log(machine, "UPGRADE: Production speed increased.")
     else
         -- VARIETY UPGRADE LOGIC (Bucket System)
@@ -362,6 +408,28 @@ script.on_event(defines.events.on_gui_closed, function(event)
         local player = game.get_player(event.player_index)
         if player.gui.relative.idle_upgrade_frame then
             player.gui.relative.idle_upgrade_frame.destroy()
+        end
+    end
+end)
+
+script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
+    if event.setting ~= "idle-machine-generation-seconds" and event.setting ~= "idle-machine-levelup-seconds" then
+        return
+    end
+
+    if event.setting == "idle-machine-generation-seconds" and storage.idle_machines then
+        for _, machine in pairs(storage.idle_machines) do
+            if machine.entity and machine.entity.valid then
+                local old_rate = machine.generation_tick_rate or get_base_generation_tick_rate()
+                local remaining = math.max(0, (machine.next_generation_tick or game.tick) - game.tick)
+                local progress = 0
+                if old_rate > 0 then
+                    progress = 1 - (remaining / old_rate)
+                end
+                machine.generation_tick_rate = calculate_generation_tick_rate(machine)
+                local new_remaining = math.max(1, math.floor((1 - progress) * machine.generation_tick_rate))
+                machine.next_generation_tick = game.tick + new_remaining
+            end
         end
     end
 end)
